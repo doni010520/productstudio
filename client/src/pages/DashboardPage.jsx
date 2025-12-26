@@ -37,6 +37,7 @@ const DashboardPage = () => {
     const fetchStyles = async () => {
         try {
             const response = await api.get('/styles');
+            const stylesData = Array.isArray(response.data) ? response.data : response.data.styles || [];
             setStyles(response.data);
             
             // Group styles by category
