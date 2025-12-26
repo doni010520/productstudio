@@ -37,16 +37,11 @@ const DashboardPage = () => {
     const fetchStyles = async () => {
         try {
             const response = await api.get('/styles');
-            const stylesData = Array.isArray(response.data) ? response.data : response.data.styles || [];
-            setStyles(response.data);
+            const stylesData = response.data.styles || [];
+            const groupedData = response.data.grouped || {};
             
-            // Group styles by category
-            const grouped = response.data.reduce((acc, style) => {
-                if (!acc[style.category]) acc[style.category] = [];
-                acc[style.category].push(style);
-                return acc;
-            }, {});
-            setGroupedStyles(grouped);
+            setStyles(stylesData);
+            setGroupedStyles(groupedData);
         } catch (err) {
             console.error('Error fetching styles:', err);
         }
@@ -227,12 +222,12 @@ const DashboardPage = () => {
                                     <motion.div
                                         initial={{ opacity: 0, scale: 0.9 }}
                                         animate={{ opacity: 1, scale: 1 }}
-                                        className="relative rounded-xl overflow-hidden"
+                                        className="relative rounded-xl overflow-hidden bg-white/5"
                                     >
                                         <img
                                             src={previewUrl}
                                             alt="Preview"
-                                            className="w-full rounded-xl object-contain"
+                                            className="w-full rounded-xl object-contain max-h-96"
                                         />
                                     </motion.div>
                                 )}
