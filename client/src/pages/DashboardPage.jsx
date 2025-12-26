@@ -232,7 +232,7 @@ const DashboardPage = () => {
                                         <img
                                             src={previewUrl}
                                             alt="Preview"
-                                            className="w-full rounded-xl"
+                                            className="w-full rounded-xl object-contain"
                                         />
                                     </motion.div>
                                 )}
