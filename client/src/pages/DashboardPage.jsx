@@ -1,321 +1,382 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useDropzone } from 'react-dropzone';
-import toast, { Toaster } from 'react-hot-toast';
-import { Upload, Sparkles, Download, Loader2, X } from 'lucide-react';
-import { styles as stylesApi, generation as generationApi } from '../services/api';
+import { useNavigate } from 'react-router-dom';
+import { Upload, Sparkles, LogOut, User, Zap, Sliders } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import api from '../services/api';
 import GlassCard from '../components/GlassCard';
+import AspectRatioSelector from '../components/AspectRatioSelector';
+import ImageCompare from '../components/ImageCompare';
+import StylePresetCard from '../components/StylePresetCard';
 
 const DashboardPage = () => {
-    const [styles, setStyles] = useState([]);
-    const [groupedStyles, setGroupedStyles] = useState({});
-    const [selectedStyle, setSelectedStyle] = useState(null);
-    const [customPrompt, setCustomPrompt] = useState('');
+    const { user, logout } = useAuth();
+    const navigate = useNavigate();
+
+    // States
     const [uploadedImage, setUploadedImage] = useState(null);
     const [uploadedFile, setUploadedFile] = useState(null);
-    const [generating, setGenerating] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState(null);
+    const [styles, setStyles] = useState([]);
+    const [groupedStyles, setGroupedStyles] = useState({});
+    const [selectedStyle, setSelectedStyle] = useState('');
+    const [customPrompt, setCustomPrompt] = useState('');
+    const [aspectRatio, setAspectRatio] = useState('free');
+    const [mode, setMode] = useState('quick'); // 'quick' or 'custom'
+    const [isGenerating, setIsGenerating] = useState(false);
     const [generatedImage, setGeneratedImage] = useState(null);
-    const [generationId, setGenerationId] = useState(null);
-    const { user, updateUser } = useAuth();
+    const [error, setError] = useState('');
+    const [credits, setCredits] = useState(user?.credits || 0);
 
+    // Fetch styles on mount
     useEffect(() => {
-        loadStyles();
+        fetchStyles();
+        fetchUserCredits();
     }, []);
 
-    const loadStyles = async () => {
+    const fetchStyles = async () => {
         try {
-            const response = await stylesApi.getAll();
-            setStyles(response.data.styles);
-            setGroupedStyles(response.data.grouped);
-        } catch (error) {
-            toast.error('Erro ao carregar estilos');
+            const response = await api.get('/styles');
+            setStyles(response.data);
+            
+            // Group styles by category
+            const grouped = response.data.reduce((acc, style) => {
+                if (!acc[style.category]) acc[style.category] = [];
+                acc[style.category].push(style);
+                return acc;
+            }, {});
+            setGroupedStyles(grouped);
+        } catch (err) {
+            console.error('Error fetching styles:', err);
         }
     };
 
-    const onDrop = useCallback((acceptedFiles) => {
-        const file = acceptedFiles[0];
+    const fetchUserCredits = async () => {
+        try {
+            const response = await api.get('/user/profile');
+            setCredits(response.data.credits);
+        } catch (err) {
+            console.error('Error fetching credits:', err);
+        }
+    };
+
+    const handleImageUpload = (e) => {
+        const file = e.target.files[0];
         if (file) {
+            if (file.size > 10 * 1024 * 1024) {
+                setError('Imagem muito grande. Máximo 10MB.');
+                return;
+            }
+
             setUploadedFile(file);
             const reader = new FileReader();
-            reader.onload = () => {
-                setUploadedImage(reader.result);
+            reader.onloadend = () => {
+                setPreviewUrl(reader.result);
+                setUploadedImage(file);
+                setError('');
+                setGeneratedImage(null);
             };
             reader.readAsDataURL(file);
-            setGeneratedImage(null);
         }
-    }, []);
-
-    const { getRootProps, getInputProps, isDragActive } = useDropzone({
-        onDrop,
-        accept: {
-            'image/*': ['.jpeg', '.jpg', '.png', '.webp']
-        },
-        maxFiles: 1,
-        maxSize: 10 * 1024 * 1024 // 10MB
-    });
+    };
 
     const handleGenerate = async () => {
         if (!uploadedFile) {
-            toast.error('Por favor, faça upload de uma imagem');
+            setError('Por favor, faça upload de uma imagem');
             return;
         }
 
         if (!selectedStyle && !customPrompt) {
-            toast.error('Selecione um estilo ou digite um prompt customizado');
+            setError('Selecione um estilo ou digite um prompt customizado');
             return;
         }
 
-        if (user.credits < 1) {
-            toast.error('Créditos insuficientes. Adicione mais créditos para continuar.');
+        if (credits < 1) {
+            setError('Créditos insuficientes');
             return;
         }
 
-        setGenerating(true);
-        setGeneratedImage(null);
+        setIsGenerating(true);
+        setError('');
+
+        const formData = new FormData();
+        formData.append('image', uploadedFile);
+        if (selectedStyle) formData.append('stylePreset', selectedStyle);
+        if (customPrompt) formData.append('customPrompt', customPrompt);
+        formData.append('aspectRatio', aspectRatio);
 
         try {
-            const formData = new FormData();
-            formData.append('image', uploadedFile);
-            if (selectedStyle) {
-                formData.append('stylePreset', selectedStyle.slug);
-            }
-            if (customPrompt) {
-                formData.append('customPrompt', customPrompt);
-            }
+            const response = await api.post('/generation/create', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+            });
 
-            const response = await generationApi.create(formData);
-            setGenerationId(response.data.generationId);
+            const generationId = response.data.id;
 
             // Poll for completion
-            pollGenerationStatus(response.data.generationId);
-        } catch (error) {
-            toast.error(error.response?.data?.error || 'Erro ao gerar imagem');
-            setGenerating(false);
-        }
-    };
+            const pollInterval = setInterval(async () => {
+                try {
+                    const statusResponse = await api.get(`/generation/status/${generationId}`);
+                    const generation = statusResponse.data;
 
-    const pollGenerationStatus = async (genId) => {
-        const maxAttempts = 60; // 2 minutes max
-        let attempts = 0;
-
-        const interval = setInterval(async () => {
-            attempts++;
-
-            try {
-                const response = await generationApi.getStatus(genId);
-                const generation = response.data.generation;
-
-                if (generation.status === 'completed') {
-                    clearInterval(interval);
-                    setGeneratedImage(generation.generated_image_url);
-                    setGenerating(false);
-                    updateUser({ credits: user.credits - 1 });
-                    toast.success('Imagem gerada com sucesso!');
-                } else if (generation.status === 'failed') {
-                    clearInterval(interval);
-                    setGenerating(false);
-                    toast.error(generation.error_message || 'Falha ao gerar imagem');
-                } else if (attempts >= maxAttempts) {
-                    clearInterval(interval);
-                    setGenerating(false);
-                    toast.error('Tempo limite excedido');
+                    if (generation.status === 'completed') {
+                        clearInterval(pollInterval);
+                        setGeneratedImage(generation.generated_image_url);
+                        setIsGenerating(false);
+                        fetchUserCredits(); // Update credits
+                    } else if (generation.status === 'failed') {
+                        clearInterval(pollInterval);
+                        setError(generation.error_message || 'Falha na geração');
+                        setIsGenerating(false);
+                    }
+                } catch (err) {
+                    clearInterval(pollInterval);
+                    setError('Erro ao verificar status');
+                    setIsGenerating(false);
                 }
-            } catch (error) {
-                clearInterval(interval);
-                setGenerating(false);
-                toast.error('Erro ao verificar status');
-            }
-        }, 2000); // Check every 2 seconds
+            }, 2000);
+
+        } catch (err) {
+            setIsGenerating(false);
+            setError(err.response?.data?.message || 'Erro ao gerar imagem');
+        }
     };
 
     const handleDownload = () => {
-        if (generatedImage) {
-            const link = document.createElement('a');
-            link.href = generatedImage;
-            link.download = `productstudio-${Date.now()}.png`;
-            link.click();
-        }
+        if (!generatedImage) return;
+        
+        const link = document.createElement('a');
+        link.href = `${import.meta.env.VITE_API_URL.replace('/api', '')}${generatedImage}`;
+        link.download = `productstudio-${Date.now()}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     };
 
-    const resetGeneration = () => {
-        setUploadedImage(null);
-        setUploadedFile(null);
-        setGeneratedImage(null);
-        setGenerationId(null);
-        setSelectedStyle(null);
-        setCustomPrompt('');
+    const handleLogout = () => {
+        logout();
+        navigate('/login');
     };
 
     return (
-        <div className="min-h-screen bg-dark-900 bg-animated-mesh pt-24 pb-12 px-6">
-            <Toaster position="top-center" />
-
-            <div className="max-w-7xl mx-auto">
-                {/* Header */}
-                <motion.div
-                    className="text-center mb-12"
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                >
-                    <h1 className="text-5xl font-bold mb-4">
-                        Crie Backgrounds <span className="gradient-text">Incríveis</span>
-                    </h1>
-                    <p className="text-gray-400 text-lg">
-                        Faça upload da sua imagem e escolha um estilo
-                    </p>
-                </motion.div>
-
-                <div className="grid lg:grid-cols-2 gap-8">
-                    {/* Left Column - Upload & Result */}
-                    <div className="space-y-6">
-                        {/* Upload Area */}
-                        {!uploadedImage ? (
-                            <GlassCard>
-                                <div
-                                    {...getRootProps()}
-                                    className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
-                                        isDragActive
-                                            ? 'border-primary-500 bg-primary-500/10'
-                                            : 'border-white/20 hover:border-primary-500/50'
-                                    }`}
-                                >
-                                    <input {...getInputProps()} />
-                                    <Upload className="w-16 h-16 mx-auto mb-4 text-gray-400" />
-                                    <p className="text-lg font-medium mb-2">
-                                        {isDragActive
-                                            ? 'Solte a imagem aqui'
-                                            : 'Arraste uma imagem ou clique para selecionar'}
-                                    </p>
-                                    <p className="text-sm text-gray-400">
-                                        PNG, JPG ou WebP (máx. 10MB)
-                                    </p>
-                                </div>
-                            </GlassCard>
-                        ) : (
-                            <GlassCard>
-                                <div className="relative">
-                                    <button
-                                        onClick={resetGeneration}
-                                        className="absolute top-2 right-2 glass p-2 rounded-lg hover:bg-red-500/20 z-10"
-                                    >
-                                        <X className="w-5 h-5" />
-                                    </button>
-                                    <img
-                                        src={uploadedImage}
-                                        alt="Uploaded"
-                                        className="w-full rounded-xl"
-                                    />
-                                </div>
-                            </GlassCard>
-                        )}
-
-                        {/* Generated Result */}
-                        <AnimatePresence>
-                            {(generating || generatedImage) && (
-                                <motion.div
-                                    initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
-                                    exit={{ opacity: 0, height: 0 }}
-                                >
-                                    <GlassCard>
-                                        <h3 className="text-xl font-bold mb-4 flex items-center">
-                                            <Sparkles className="w-5 h-5 mr-2 text-primary-400" />
-                                            Resultado
-                                        </h3>
-                                        {generating ? (
-                                            <div className="aspect-square bg-dark-800/50 rounded-xl flex items-center justify-center">
-                                                <div className="text-center">
-                                                    <Loader2 className="w-12 h-12 animate-spin text-primary-500 mx-auto mb-4" />
-                                                    <p className="text-gray-400">Gerando sua imagem...</p>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div>
-                                                <img
-                                                    src={generatedImage}
-                                                    alt="Generated"
-                                                    className="w-full rounded-xl mb-4"
-                                                />
-                                                <motion.button
-                                                    onClick={handleDownload}
-                                                    className="btn-primary w-full flex items-center justify-center"
-                                                    whileHover={{ scale: 1.02 }}
-                                                    whileTap={{ scale: 0.98 }}
-                                                >
-                                                    <Download className="w-5 h-5 mr-2" />
-                                                    Baixar Imagem
-                                                </motion.button>
-                                            </div>
-                                        )}
-                                    </GlassCard>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
+        <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+            {/* Header */}
+            <header className="glass border-b border-white/10 sticky top-0 z-50 backdrop-blur-xl">
+                <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                        <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-purple-600 rounded-xl flex items-center justify-center">
+                            <Sparkles className="w-6 h-6 text-white" />
+                        </div>
+                        <h1 className="text-2xl font-bold bg-gradient-to-r from-primary-400 to-purple-400 text-transparent bg-clip-text">
+                            ProductStudio
+                        </h1>
                     </div>
 
-                    {/* Right Column - Styles & Prompt */}
-                    <div className="space-y-6">
-                        {/* Style Selection */}
+                    <div className="flex items-center space-x-4">
+                        <div className="glass px-4 py-2 rounded-lg flex items-center space-x-2">
+                            <Sparkles className="w-5 h-5 text-primary-400" />
+                            <span className="font-bold text-lg">{credits}</span>
+                            <span className="text-sm text-gray-400">créditos</span>
+                        </div>
+                        
+                        <button className="glass p-2 rounded-lg hover:bg-white/10 transition-colors">
+                            <User className="w-5 h-5" />
+                        </button>
+                        
+                        <button
+                            onClick={handleLogout}
+                            className="glass p-2 rounded-lg hover:bg-white/10 transition-colors"
+                        >
+                            <LogOut className="w-5 h-5" />
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <div className="max-w-7xl mx-auto px-4 py-8">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Left Column - Upload & Preview */}
+                    <div className="lg:col-span-1 space-y-6">
+                        {/* Upload Area */}
                         <GlassCard>
-                            <h3 className="text-xl font-bold mb-4">Escolha um Estilo</h3>
-                            <div className="space-y-6 max-h-[600px] overflow-y-auto custom-scrollbar pr-2">
-                                {Object.entries(groupedStyles).map(([category, categoryStyles]) => (
-                                    <div key={category}>
-                                        <h4 className="text-sm font-semibold text-primary-400 mb-3">
-                                            {category}
-                                        </h4>
-                                        <div className="grid grid-cols-2 gap-3">
-                                            {categoryStyles.map((style) => (
-                                                <motion.button
-                                                    key={style.id}
-                                                    onClick={() => setSelectedStyle(style)}
-                                                    className={`glass p-4 rounded-xl text-left transition-all ${
-                                                        selectedStyle?.id === style.id
-                                                            ? 'bg-primary-500/20 border-primary-500 shadow-glow-blue'
-                                                            : 'hover:bg-white/10'
-                                                    }`}
-                                                    whileHover={{ scale: 1.02 }}
-                                                    whileTap={{ scale: 0.98 }}
-                                                >
-                                                    <p className="font-medium text-sm">{style.name}</p>
-                                                </motion.button>
-                                            ))}
-                                        </div>
+                            <div className="space-y-4">
+                                <h2 className="text-xl font-bold flex items-center">
+                                    <Upload className="w-5 h-5 mr-2" />
+                                    Faça Upload
+                                </h2>
+
+                                <label className="block">
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        onChange={handleImageUpload}
+                                        className="hidden"
+                                    />
+                                    <div className="glass border-2 border-dashed border-white/20 rounded-xl p-8 text-center cursor-pointer hover:border-primary-500 transition-colors">
+                                        <Upload className="w-12 h-12 mx-auto mb-3 text-gray-400" />
+                                        <p className="text-sm text-gray-300">
+                                            Clique para selecionar
+                                        </p>
+                                        <p className="text-xs text-gray-500 mt-1">
+                                            PNG, JPG ou WebP (máx. 10MB)
+                                        </p>
                                     </div>
-                                ))}
+                                </label>
+
+                                {previewUrl && (
+                                    <motion.div
+                                        initial={{ opacity: 0, scale: 0.9 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        className="relative rounded-xl overflow-hidden"
+                                    >
+                                        <img
+                                            src={previewUrl}
+                                            alt="Preview"
+                                            className="w-full rounded-xl"
+                                        />
+                                    </motion.div>
+                                )}
                             </div>
                         </GlassCard>
 
-                        {/* Custom Prompt */}
+                        {/* Result with Compare */}
+                        {generatedImage && previewUrl && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 20 }}
+                                animate={{ opacity: 1, y: 0 }}
+                            >
+                                <GlassCard>
+                                    <h2 className="text-xl font-bold mb-4 flex items-center">
+                                        <Sparkles className="w-5 h-5 mr-2" />
+                                        Resultado
+                                    </h2>
+                                    <ImageCompare
+                                        originalImage={previewUrl}
+                                        generatedImage={`${import.meta.env.VITE_API_URL.replace('/api', '')}${generatedImage}`}
+                                        onDownload={handleDownload}
+                                    />
+                                </GlassCard>
+                            </motion.div>
+                        )}
+                    </div>
+
+                    {/* Right Column - Configuration */}
+                    <div className="lg:col-span-2 space-y-6">
+                        {/* Mode Toggle */}
                         <GlassCard>
-                            <h3 className="text-xl font-bold mb-4">Ou use um Prompt Customizado</h3>
-                            <textarea
-                                value={customPrompt}
-                                onChange={(e) => setCustomPrompt(e.target.value)}
-                                placeholder="Descreva o fundo que você deseja... (opcional)"
-                                className="input-glass w-full min-h-[100px] resize-none"
-                            />
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => setMode('quick')}
+                                    className={`flex-1 flex items-center justify-center py-3 px-4 rounded-lg transition-all ${
+                                        mode === 'quick'
+                                            ? 'bg-primary-500 text-white'
+                                            : 'glass hover:bg-white/10'
+                                    }`}
+                                >
+                                    <Zap className="w-5 h-5 mr-2" />
+                                    Modo Rápido
+                                </button>
+                                <button
+                                    onClick={() => setMode('custom')}
+                                    className={`flex-1 flex items-center justify-center py-3 px-4 rounded-lg transition-all ${
+                                        mode === 'custom'
+                                            ? 'bg-primary-500 text-white'
+                                            : 'glass hover:bg-white/10'
+                                    }`}
+                                >
+                                    <Sliders className="w-5 h-5 mr-2" />
+                                    Personalizar
+                                </button>
+                            </div>
                         </GlassCard>
+
+                        {/* Aspect Ratio Selector */}
+                        {mode === 'custom' && (
+                            <motion.div
+                                initial={{ opacity: 0, y: -20 }}
+                                animate={{ opacity: 1, y: 0 }}
+                            >
+                                <GlassCard>
+                                    <AspectRatioSelector
+                                        selected={aspectRatio}
+                                        onSelect={setAspectRatio}
+                                    />
+                                </GlassCard>
+                            </motion.div>
+                        )}
+
+                        {/* Style Selection */}
+                        <GlassCard>
+                            <h2 className="text-xl font-bold mb-4">Escolha o Estilo</h2>
+                            
+                            {Object.entries(groupedStyles).map(([category, categoryStyles]) => (
+                                <div key={category} className="mb-6 last:mb-0">
+                                    <h3 className="text-sm font-medium text-primary-400 mb-3">
+                                        {category}
+                                    </h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                        {categoryStyles.map((style) => (
+                                            <StylePresetCard
+                                                key={style.id}
+                                                style={style}
+                                                isSelected={selectedStyle === style.slug}
+                                                onClick={() => setSelectedStyle(style.slug)}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </GlassCard>
+
+                        {/* Custom Prompt */}
+                        {mode === 'custom' && (
+                            <motion.div
+                                initial={{ opacity: 0, y: -20 }}
+                                animate={{ opacity: 1, y: 0 }}
+                            >
+                                <GlassCard>
+                                    <h2 className="text-xl font-bold mb-4">Ou use um Prompt Customizado</h2>
+                                    <textarea
+                                        value={customPrompt}
+                                        onChange={(e) => setCustomPrompt(e.target.value)}
+                                        placeholder="Descreva o fundo que você deseja... (opcional)"
+                                        className="input-field w-full h-24 resize-none"
+                                    />
+                                </GlassCard>
+                            </motion.div>
+                        )}
+
+                        {/* Error Message */}
+                        <AnimatePresence>
+                            {error && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: -10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0 }}
+                                    className="glass border border-red-500/50 bg-red-500/10 p-4 rounded-xl"
+                                >
+                                    <p className="text-red-400 text-sm">{error}</p>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
 
                         {/* Generate Button */}
                         <motion.button
                             onClick={handleGenerate}
-                            disabled={generating || !uploadedImage}
+                            disabled={isGenerating || !uploadedImage}
                             className="btn-primary w-full py-4 text-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                            whileHover={!generating && uploadedImage ? { scale: 1.02 } : {}}
-                            whileTap={!generating && uploadedImage ? { scale: 0.98 } : {}}
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
                         >
-                            {generating ? (
-                                <span className="flex items-center justify-center">
-                                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                                    Gerando...
-                                </span>
+                            {isGenerating ? (
+                                <div className="flex items-center justify-center">
+                                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white mr-3" />
+                                    Gerando... (pode levar 20-30s)
+                                </div>
                             ) : (
-                                <span className="flex items-center justify-center">
-                                    <Sparkles className="w-5 h-5 mr-2" />
+                                <div className="flex items-center justify-center">
+                                    <Sparkles className="w-6 h-6 mr-2" />
                                     Gerar Background (1 crédito)
-                                </span>
+                                </div>
                             )}
                         </motion.button>
                     </div>
